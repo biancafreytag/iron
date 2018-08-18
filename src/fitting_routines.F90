@@ -1360,7 +1360,6 @@ CONTAINS
     TYPE(EquationsMatricesLinearType), POINTER :: linearMatrices
     TYPE(EquationsMatricesNonlinearType), POINTER :: nonlinearMatrices
     TYPE(EquationsMatricesRHSType), POINTER :: rhsVector
-    TYPE(EquationsMatrixType), POINTER :: equationsMatrix
     TYPE(EquationsVectorType), POINTER :: vectorEquations
     TYPE(FIELD_TYPE), POINTER :: dependentField,geometricField,independentField,materialsField
     TYPE(FIELD_VARIABLE_TYPE), POINTER :: dataVariable,dataWeightVariable,dependentVariable
@@ -1370,7 +1369,7 @@ CONTAINS
     REAL(DP), POINTER :: independentVectorParameters(:),independentWeightParameters(:)
     REAL(DP) :: projectionXi(3)
     REAL(DP) :: dataPointWeight(99),dataPointVector(99)
-    REAL(DP) :: basisFunctionRow,basisFunctionColumn
+    REAL(DP) :: basisFunctionRow
     REAL(DP) :: tension,curvature
     REAL(DP) :: sum,jacobianGaussWeight
     REAL(DP) :: tauParam,kappaParam
@@ -1381,6 +1380,17 @@ CONTAINS
       & dependentElementParameterRowIdx,dependentParameterColumnIdx,dependentParameterRowIdx,gaussPointIdx, &
       & meshComponentRow,meshComponentColumn,numberOfDataComponents
     INTEGER(INTG) :: dependentVariableType,localDof
+
+    REAL(DP) :: F(3),G(3),H(3)
+    REAL(DP) :: R(3,3), dXdNuR(3,3), dXdNu(3,3)
+    REAL(DP) :: a,b,c,d,s
+    REAL(DP) :: f1,f2,f3, w1, w2, w3, dO_df1, dO_df2, dO_df3, dO_dq_F, ObjF_norm, ObjF_sum
+    REAL(DP) :: dO_df1_inner,dO_df2_inner,dO_df3_inner
+    REAL(DP) :: n1,n2,n3, v1, v2, v3, dO_dn1, dO_dn2, dO_dn3, dO_dq_N, ObjN_norm, ObjN_sum
+    REAL(DP) :: dO_dn1_inner,dO_dn2_inner,dO_dn3_inner
+    REAL(DP) :: D11, D12, D13, D22, D23, D33, lambda1, lambda3
+    REAL(DP) :: residualValue, eigenvalueConstant
+
 
     ENTERS("Fitting_FiniteElementResidualEvaluate",err,error,*999)
 
@@ -1455,6 +1465,11 @@ CONTAINS
             ELSE
               CALL FlagError("Decomposition topology is not associated on the independent field.",err,error,*999)
             ENDIF
+
+            ObjF_sum = 0.0_DP
+            ObjN_sum = 0.0_DP
+
+
             !Loop over data points
             DO dataPointIdx=1,dataPoints%elementDataPoint(elementNumber)%numberOfProjectedData
               dataPointUserNumber = dataPoints%elementDataPoint(elementNumber)%dataIndices(dataPointIdx)%userNumber
@@ -1478,39 +1493,219 @@ CONTAINS
                 dataPointWeight(componentIdx)=independentWeightParameters(localDof)
               ENDDO !componentIdx
 
+              CALL Field_ParameterSetGetDataPoint(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,&
+                      & dataPointIdx,1,D11,err,error,*999)
+              CALL Field_ParameterSetGetDataPoint(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,&
+                      & dataPointIdx,2,D12,err,error,*999)
+              CALL Field_ParameterSetGetDataPoint(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,&
+                      & dataPointIdx,3,D13,err,error,*999)
+              CALL Field_ParameterSetGetDataPoint(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,&
+                      & dataPointIdx,4,D22,err,error,*999)
+              CALL Field_ParameterSetGetDataPoint(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,&
+                      & dataPointIdx,5,D23,err,error,*999)
+              CALL Field_ParameterSetGetDataPoint(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE,&
+                      & dataPointIdx,6,D33,err,error,*999)
+
+
+              ! reference material direction 1
+              F(1:3) = equations%interpolation%geometricInterpPointMetrics(FIELD_U_VARIABLE_TYPE)%ptr%DX_DXI(1:3,1)
+
+              CALL CrossProduct(F,equations%interpolation%geometricInterpPointMetrics(FIELD_U_VARIABLE_TYPE)%ptr%DX_DXI(1:3,2),&
+                      & H,err,error,*999) !reference material direction 3.
+              CALL CrossProduct(H,F,G,err,error,*999) !reference material direction 2.
+
+              CALL Normalise(F,dXdNuR(1:3,1),err,error,*999)
+              CALL Normalise(G,dXdNuR(1:3,2),err,error,*999)
+              CALL Normalise(H,dXdNuR(1:3,3),err,error,*999)
+
+              w1 = dXdNuR(1,1) ! first component of fibre vector of wall coordinate system
+              w2 = dXdNuR(2,1) ! second component of fibre vector of wall coordinate system
+              w3 = dXdNuR(3,1) ! third component of fibre vector of wall coordinate system
+
+              v1 = dXdNuR(1,3) ! first component of sheet-normal vector of wall coordinate system
+              v2 = dXdNuR(2,3) ! second component of sheet-normal vector of wall coordinate system
+              v3 = dXdNuR(3,3) ! third component of sheet-normal vector of wall coordinate system
+
+
+              a = equations%interpolation%dependentInterpPoint(FIELD_U_VARIABLE_TYPE)%ptr%values(1,NO_PART_DERIV)
+              b = equations%interpolation%dependentInterpPoint(FIELD_U_VARIABLE_TYPE)%ptr%values(2,NO_PART_DERIV)
+              c = equations%interpolation%dependentInterpPoint(FIELD_U_VARIABLE_TYPE)%ptr%values(3,NO_PART_DERIV)
+              d = equations%interpolation%dependentInterpPoint(FIELD_U_VARIABLE_TYPE)%ptr%values(4,NO_PART_DERIV)
+
+              !WRITE(*,*) "quaternions at point", dataPointIdx, a,b,c,d
+
+              s=1.0_DP/(a**2 + b**2 + c**2 + d**2)
+
+              CALL IdentityMatrix(R,err,error,*999)
+              R(1,1)=(1.0_DP-2.0_DP*s*(c**2+d**2))
+              R(1,2)=(2.0_DP*s*(b*c-a*d))
+              R(1,3)=(2.0_DP*s*(b*d+a*c))
+              R(2,1)=(2.0_DP*s*(b*c+a*d))
+              R(2,2)=(1.0_DP-2.0_DP*s*(b**2+d**2))
+              R(2,3)=(2.0_DP*s*(c*d-a*b))
+              R(3,1)=(2.0_DP*s*(b*d-a*c))
+              R(3,2)=(2.0_DP*s*(c*d+a*b))
+              R(3,3)=(1.0_DP-2.0_DP*s*(b**2+c**2))
+
+              CALL MatrixProduct(R,dXdNuR,dXdNu,err,error,*999)
+
+              f1 = dXdNu(1,1) !x component of fibre vector at data point
+              f2 = dXdNu(2,1) !y component of fibre vector at data point
+              f3 = dXdNu(3,1) !z component of fibre vector at data point
+
+              n1 = dXdNu(1,3) !x component of sheet-normal vector at data point
+              n2 = dXdNu(2,3) !y component of sheet-normal vector at data point
+              n3 = dXdNu(3,3) !z component of sheet-normal vector at data point
+
+
+              lambda1 = 0.3_DP
+              lambda3 = 0.15_DP
+
+              eigenvalueConstant = 1.0_DP/(lambda1-lambda3)
+
+              !dO_df1 = -eigenvalueConstant*2.0_DP*(D11*f1 + D12*f2+D13*f3)
+              !dO_df2 = -eigenvalueConstant*2.0_DP*(D12*f1 + D22*f2+D23*f3)
+              !dO_df3 = -eigenvalueConstant*2.0_DP*(D13*f1 + D23*f2+D33*f3)
+
+              !dO_dn1 = eigenvalueConstant*2.0_DP*(D11*n1 + D12*n2 + D13*n3)
+              !dO_dn2 = eigenvalueConstant*2.0_DP*(D12*n1 + D22*n2 + D23*n3)
+              !dO_dn3 = eigenvalueConstant*2.0_DP*(D13*n1 + D23*n2 + D33*n3)
+
+              dO_df1_inner = -eigenvalueConstant*2.0_DP*(D11*f1 + D12*f2+D13*f3)
+              dO_df2_inner = -eigenvalueConstant*2.0_DP*(D12*f1 + D22*f2+D23*f3)
+              dO_df3_inner = -eigenvalueConstant*2.0_DP*(D13*f1 + D23*f2+D33*f3)
+
+              dO_dn1_inner = eigenvalueConstant*2.0_DP*(D11*n1 + D12*n2 + D13*n3)
+              dO_dn2_inner = eigenvalueConstant*2.0_DP*(D12*n1 + D22*n2 + D23*n3)
+              dO_dn3_inner = eigenvalueConstant*2.0_DP*(D13*n1 + D23*n2 + D33*n3)
+
+              ObjF_norm = (lambda1-(f1**2*D11+f2**2*D22+f3**2*D33+2*(f1*f2*D12+f1*f3*D13+f2*f3*D23)))*eigenvalueConstant
+              ObjN_norm = ((n1**2*D11+n2**2*D22+n3**2*D33+2*(n1*n2*D12+n1*n3*D13+n2*n3*D23))-lambda3)*eigenvalueConstant
+
+              dO_df1 = 2*ObjF_norm*dO_df1_inner
+              dO_df2 = 2*ObjF_norm*dO_df2_inner
+              dO_df3 = 2*ObjF_norm*dO_df3_inner
+
+              dO_dn1 = 2*ObjN_norm*dO_dn1_inner
+              dO_dn2 = 2*ObjN_norm*dO_dn2_inner
+              dO_dn3 = 2*ObjN_norm*dO_dn3_inner
+
+
+              ObjF_sum = ObjF_sum + ObjF_norm**2
+              ObjN_sum = ObjN_sum + ObjN_norm**2
+
+
+
+
               dependentParameterRowIdx=0
               !Loop over element rows
               DO dependentComponentRowIdx=1,dependentVariable%NUMBER_OF_COMPONENTS
                 meshComponentRow=dependentVariable%components(dependentComponentRowIdx)%MESH_COMPONENT_NUMBER
                 dependentBasisRow=>dependentField%decomposition%domain(meshComponentRow)%ptr%topology%elements% &
                   & elements(elementNumber)%basis
+
+                SELECT CASE(dependentComponentRowIdx)
+                CASE(1) ! component a
+
+                  dO_dq_F =   dO_df1 *(((4.0_DP*a*(c**2.0_DP + d**2.0_DP))/s**2.0_DP)*w1+&
+                              &((4.0_DP*a*(a*d - b*c))/s**2.0_DP - (2*d)/s)*w2+&
+                              &((2*c)/s - (4.0_DP*a*(a*c + b*d))/s**2.0_DP)*w3)&
+                          &+dO_df2 *(((2.0_DP*d)/s - (4.0_DP*a*(a*d + b*c))/s**2.0_DP)*w1+&
+                              &((4.0_DP*a*(b**2.0_DP + d**2.0_DP))/s**2.0_DP)*w2+&
+                              &((4.0_DP*a*(a*b - c*d))/s**2.0_DP - (2*b)/s)*w3)&
+                          &+dO_df3 *(((4.0_DP*a*(a*c - b*d))/s**2.0_DP - (2.0_DP*c)/s)*w1+&
+                              &((2.0_DP*b)/s - (4.0_DP*a*(a*b + c*d))/s**2.0_DP)*w2+&
+                              &((4.0_DP*a*(b**2.0_DP + c**2.0_DP))/s**2.0_DP)*w3)
+
+                  dO_dq_N =   dO_dn1 *(((4.0_DP*a*(c**2.0_DP + d**2.0_DP))/s**2.0_DP)*v1+&
+                              &((4.0_DP*a*(a*d - b*c))/s**2.0_DP - (2*d)/s)*v2+&
+                              &((2*c)/s - (4.0_DP*a*(a*c + b*d))/s**2.0_DP)*v3)&
+                          &+dO_dn2 *(((2.0_DP*d)/s - (4.0_DP*a*(a*d + b*c))/s**2.0_DP)*v1+&
+                              &((4.0_DP*a*(b**2.0_DP + d**2.0_DP))/s**2.0_DP)*v2+&
+                              &((4.0_DP*a*(a*b - c*d))/s**2.0_DP - (2*b)/s)*v3)&
+                          &+dO_dn3 *(((4.0_DP*a*(a*c - b*d))/s**2.0_DP - (2.0_DP*c)/s)*v1+&
+                              &((2.0_DP*b)/s - (4.0_DP*a*(a*b + c*d))/s**2.0_DP)*v2+&
+                              &((4.0_DP*a*(b**2.0_DP + c**2.0_DP))/s**2.0_DP)*v3)
+
+                CASE(2) ! component b
+                  dO_dq_F =  dO_df1*(((4.0_DP*b*(c**2.0_DP + d**2.0_DP))/s**2.0_DP)*w1+&
+                              &((2*c)/s + (4.0_DP*b*(a*d - b*c))/s**2.0_DP)*w2+&
+                              &((2*d)/s - (4.0_DP*b*(a*c + b*d))/s**2.0_DP)*w3)&
+                         &+dO_df2*(((2.0_DP*c)/s - (4.0_DP*b*(a*d + b*c))/s**2.0_DP)*w1+&
+                              &((4.0_DP*b*(b**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*b)/s)*w2+&
+                              &((4.0_DP*b*(a*b - c*d))/s**2.0_DP - (2.0_DP*a)/s)*w3)&
+                         &+dO_df3*(((2.0_DP*d)/s + (4.0_DP*b*(a*c - b*d))/s**2.0_DP)*w1+&
+                              &((2.0_DP*a)/s - (4.0_DP*b*(a*b + c*d))/s**2.0_DP)*w2+&
+                              &((4.0_DP*b*(b**2.0_DP + c**2.0_DP))/s**2.0_DP - (4.0_DP*b)/s)*w3)
+
+                  dO_dq_N =  dO_dn1*(((4.0_DP*b*(c**2.0_DP + d**2.0_DP))/s**2.0_DP)*v1+&
+                              &((2*c)/s + (4.0_DP*b*(a*d - b*c))/s**2.0_DP)*v2+&
+                              &((2*d)/s - (4.0_DP*b*(a*c + b*d))/s**2.0_DP)*v3)&
+                         &+dO_dn2*(((2.0_DP*c)/s - (4.0_DP*b*(a*d + b*c))/s**2.0_DP)*v1+&
+                              &((4.0_DP*b*(b**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*b)/s)*v2+&
+                              &((4.0_DP*b*(a*b - c*d))/s**2.0_DP - (2.0_DP*a)/s)*v3)&
+                         &+dO_dn3*(((2.0_DP*d)/s + (4.0_DP*b*(a*c - b*d))/s**2.0_DP)*v1+&
+                              &((2.0_DP*a)/s - (4.0_DP*b*(a*b + c*d))/s**2.0_DP)*v2+&
+                              &((4.0_DP*b*(b**2.0_DP + c**2.0_DP))/s**2.0_DP - (4.0_DP*b)/s)*v3)
+
+                CASE(3) ! component c
+                  dO_dq_F =  dO_df1*(((4.0_DP*c*(c**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*c)/s)*w1+&
+                              &((2.0_DP*b)/s + (4.0_DP*c*(a*d - b*c))/s**2.0_DP)*w2+&
+                              &((2.0_DP*a)/s - (4.0_DP*c*(a*c + b*d))/s**2.0_DP)*w3)&
+                          &+dO_df2*(((2.0_DP*b)/s - (4.0_DP*c*(a*d + b*c))/s**2.0_DP)*w1+&
+                              &((4.0_DP*c*(b**2.0_DP + d**2.0_DP))/s**2.0_DP)*w2+&
+                              &((2.0_DP*d)/s + (4.0_DP*c*(a*b - c*d))/s**2.0_DP)*w3)&
+                          &+dO_df3*(((4.0_DP*c*(a*c - b*d))/s**2.0_DP - (2.0_DP*a)/s)*w1+&
+                              &((2.0_DP*d)/s - (4.0_DP*c*(a*b + c*d))/s**2.0_DP)*w2+&
+                              &((4.0_DP*c*(b**2.0_DP + c**2.0_DP))/s**2.0_DP - (4.0_DP*c)/s)*w3)
+
+                  dO_dq_N =  dO_dn1*(((4.0_DP*c*(c**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*c)/s)*v1+&
+                              &((2.0_DP*b)/s + (4.0_DP*c*(a*d - b*c))/s**2.0_DP)*v2+&
+                              &((2.0_DP*a)/s - (4.0_DP*c*(a*c + b*d))/s**2.0_DP)*v3)&
+                          &+dO_dn2*(((2.0_DP*b)/s - (4.0_DP*c*(a*d + b*c))/s**2.0_DP)*v1+&
+                              &((4.0_DP*c*(b**2.0_DP + d**2.0_DP))/s**2.0_DP)*v2+&
+                              &((2.0_DP*d)/s + (4.0_DP*c*(a*b - c*d))/s**2.0_DP)*v3)&
+                          &+dO_dn3*(((4.0_DP*c*(a*c - b*d))/s**2.0_DP - (2.0_DP*a)/s)*v1+&
+                              &((2.0_DP*d)/s - (4.0_DP*c*(a*b + c*d))/s**2.0_DP)*v2+&
+                              &((4.0_DP*c*(b**2.0_DP + c**2.0_DP))/s**2.0_DP - (4.0_DP*c)/s)*v3)
+
+                CASE(4) ! componens d
+                  dO_dq_F = dO_df1*(((4.0_DP*d*(c**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*d)/s)*w1+&
+                              &((4.0_DP*d*(a*d - b*c))/s**2.0_DP - (2.0_DP*a)/s)*w2+&
+                              &((2*b)/s - (4.0_DP*d*(a*c + b*d))/s**2.0_DP)*w3)&
+                          &+dO_df2*(((2*a)/s - (4.0_DP*d*(a*d + b*c))/s**2.0_DP)*w1+&
+                              &((4.0_DP*d*(b**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*d)/s)*w2+&
+                              &((2*c)/s + (4.0_DP*d*(a*b - c*d))/s**2.0_DP)*w3)&
+                          &+dO_df3*(((2*b)/s + (4*d*(a*c - b*d))/s**2.0_DP)*w1+&
+                              &((2.0_DP*c)/s - (4.0_DP*d*(a*b + c*d))/s**2.0_DP)*w2+&
+                              &((4.0_DP*d*(b**2.0_DP + c**2.0_DP))/s**2.0_DP)*w3)
+
+                  dO_dq_N = dO_dn1*(((4.0_DP*d*(c**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*d)/s)*v1+&
+                              &((4.0_DP*d*(a*d - b*c))/s**2.0_DP - (2.0_DP*a)/s)*v2+&
+                              &((2*b)/s - (4.0_DP*d*(a*c + b*d))/s**2.0_DP)*v3)&
+                          &+dO_dn2*(((2*a)/s - (4.0_DP*d*(a*d + b*c))/s**2.0_DP)*v1+&
+                              &((4.0_DP*d*(b**2.0_DP + d**2.0_DP))/s**2.0_DP - (4.0_DP*d)/s)*v2+&
+                              &((2*c)/s + (4.0_DP*d*(a*b - c*d))/s**2.0_DP)*v3)&
+                          &+dO_dn3*(((2*b)/s + (4*d*(a*c - b*d))/s**2.0_DP)*v1+&
+                              &((2.0_DP*c)/s - (4.0_DP*d*(a*b + c*d))/s**2.0_DP)*v2+&
+                              &((4.0_DP*d*(b**2.0_DP + c**2.0_DP))/s**2.0_DP)*v3)
+
+                END SELECT
+
+
+
                 DO dependentElementParameterRowIdx=1,dependentBasisRow%NUMBER_OF_ELEMENT_PARAMETERS
                   dependentParameterRowIdx=dependentParameterRowIdx+1
                   dependentParameterColumnIdx=0
                   basisFunctionRow=Basis_EvaluateXi(dependentBasisRow,dependentElementParameterRowIdx,NO_PART_DERIV, &
                     & projectionXi,err,error)
-                  !!!IF(equationsMatrix%updateMatrix) THEN
-                  !Loop over element columns
-                  sum = 0.0_DP
-                  DO dependentComponentColumnIdx=1,dependentVariable%NUMBER_OF_COMPONENTS
-                    meshComponentColumn=dependentVariable%components(dependentComponentColumnIdx)%MESH_COMPONENT_NUMBER
-                    dependentBasisColumn=>dependentField%decomposition%domain(meshComponentColumn)%ptr% &
-                      & topology%elements%elements(elementNumber)%basis
-                    DO dependentElementParameterColumnIdx=1,dependentBasisColumn%NUMBER_OF_ELEMENT_PARAMETERS
-                      dependentParameterColumnIdx=dependentParameterColumnIdx+1
-                      !Treat each component as separate and independent so only calculate the diagonal blocks
-                      IF(dependentComponentColumnIdx==dependentComponentRowIdx) THEN
-                        basisFunctionColumn=Basis_EvaluateXi(dependentBasisColumn,dependentElementParameterColumnIdx, &
-                          & NO_PART_DERIV,projectionXi,err,error)
-                        !sum = basisFunctionRow*basisFunctionColumn*dataPointWeight(dependentComponentRowIdx)* &
-                        !& equations%interpolation%dependentinterpparameters(1)%ptr%parameters( &
-                        !& dependentComponentRowIdx,dependentElementParameterRowIdx)
-                      ENDIF
-                    ENDDO !dependentElementParameterColumnIdx
-                  ENDDO !dependentComponentColumnIdx
+
+                  residualValue = (basisFunctionRow*(1.0_DP*dO_dq_F + 1.0_DP*dO_dq_N))
+
+
                   nonlinearMatrices%elementResidual%vector(dependentParameterRowIdx) = &
-                  & nonlinearMatrices%elementResidual%vector(dependentParameterRowIdx) + sum
-                  !!!ENDIF
+                  & nonlinearMatrices%elementResidual%vector(dependentParameterRowIdx) + residualValue
+
                   IF(rhsVector%updateVector) THEN
                     sum = basisFunctionRow*dataPointVector(dependentComponentRowIdx)*dataPointWeight(dependentComponentRowIdx)
                     rhsVector%elementVector%vector(dependentParameterRowIdx)= &
@@ -1519,6 +1714,11 @@ CONTAINS
                 ENDDO !dependentElementParameterRowIdx
               ENDDO !dependentComponentRowIdx
             ENDDO !dataPointIdx
+
+            WRITE(*,*) ObjF_sum, ObjN_sum, ObjF_sum+ ObjN_sum
+           ! WRITE(*,*) "residual Vector", nonlinearMatrices%elementResidual%vector
+            !CALL SLEEP(5)
+
 
             !Restore data point vector parameters
             CALL Field_ParameterSetDataRestore(independentField,FIELD_U_VARIABLE_TYPE,FIELD_VALUES_SET_TYPE, &
